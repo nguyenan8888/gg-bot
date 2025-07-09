@@ -14,6 +14,7 @@ class Bot {
   constructor() {
     this.listPixel = [];
     this.initBot();
+    this.listRefreshTokens = [];
   }
   async initBot() {
     try {
@@ -22,6 +23,7 @@ class Bot {
       this.botUsername = await (await this.bot.telegram.getMe()).username;
       console.log(`Started Bot ${this.botUsername}`);
       this.loadSheet();
+      this.loadRefreshTokenSheet();
       this.eventListenter();
     } catch (error) {
       console.log("error :>> ", error);
@@ -34,10 +36,19 @@ class Bot {
           reply_to_message_id: ctx.message.message_id,
         });
         await this.loadSheet();
+        await this.loadRefreshTokenSheet();
         await ctx.deleteMessage(message.message_id);
         await ctx.reply(`✅ Load Thành công ${this.listPixel.length} Pixel`, {
           reply_to_message_id: ctx.message.message_id,
         });
+      });
+      this.bot.hears("/list-refreshToken", async (ctx) => {
+        await ctx.reply(
+          `✅ Còn ${this.listRefreshTokens.length} Token dự phòng`,
+          {
+            reply_to_message_id: ctx.message.message_id,
+          }
+        );
       });
       this.bot.on("message", (ctx) => this.onMsg(ctx));
     } catch (error) {
@@ -100,7 +111,7 @@ class Bot {
   }
   waitOneSecond() {
     return new Promise((resolve) => {
-      setTimeout(resolve, 100);
+      setTimeout(resolve, 500);
     });
   }
   async onShare(ctx, msg) {
@@ -124,75 +135,57 @@ class Bot {
       );
       let success = [];
       let fail = [];
+      let needRefreshToken = false;
 
-      for (const ID_TKQC of ID_TKQCs) {
-        let r = await this.share(ctx, NAME_PIXEL, ID_TKQC, pixelObject);
-        if (r) {
-          success.push(ID_TKQC);
-        } else {
-          fail.push(ID_TKQC);
-        }
-        await this.waitOneSecond();
-        [, message] = await Promise.all([
-          ctx.deleteMessage(message.message_id),
-          ctx.reply(
-            `✅ Share Thành công ${success.length} ✅\n${success.join(
-              "\n"
-            )}\n❌ Share Thất bại ${fail.length} ❌\n${fail.join("\n")}
-            `,
-            {
-              reply_to_message_id: ctx.message.message_id,
+      const res = await Promise.map(
+        ID_TKQCs,
+        async (e) => {
+          try {
+            let r = await this.share(ctx, NAME_PIXEL, e, pixelObject);
+            if (r.code === 200) {
+              success.push(e);
+            } else {
+              if (r.code === 368 || r.code === 190) needRefreshToken = true;
+              fail.push(e);
             }
-          ),
-        ]);
-      }
-      await ctx.reply(`✅ Done`, { reply_to_message_id: message.message_id });
-      // const res = await Promise.map(
-      //   ID_TKQCs,
-      //   async (e) => {
-      //     try {
-      //       let r = await this.share(ctx, NAME_PIXEL, e, pixelObject);
-      //       if (r) {
-      //         success.push(e);
-      //       } else {
-      //         fail.push(e);
-      //       }
-      //     } catch (error) {
-      //       fail.push(e);
-      //     }
-      //   },
-      //   { concurrency: 20 }
-      // );
-      // const index = this.listPixel.findIndex(
-      //   (e) => e["NAME_PIXEL"] == NAME_PIXEL
-      // );
-      // if (this.listPixel[index].TOKEN_DIE) {
-      //   await ctx.reply(
-      //     `❌ Share Pixel Thất bại"${NAME_PIXEL}": ${this.listPixel[index].REASON}`,
-      //     { reply_to_message_id: ctx.message.message_id }
-      //   );
-      //   return;
-      // }
-      // if (success.length) {
-      //   await ctx.reply(
-      //     `✅ Share Pixel Thành công "${NAME_PIXEL}" cho List TKQC:\n${success.join(
-      //       "\n"
-      //     )}`,
-      //     { reply_to_message_id: ctx.message.message_id }
-      //   );
-      // }
+          } catch (error) {
+            console.log("=============", JSON.stringify(error));
+            fail.push(e);
+          }
+        },
+        { concurrency: 20 }
+      );
 
-      // if (fail.length) {
-      //   await ctx.reply(
-      //     `❌ Share Pixel Thất bại "${NAME_PIXEL}" cho List TKQC:\n${fail.join(
-      //       "\n"
-      //     )}`,
-      //     { reply_to_message_id: ctx.message.message_id }
-      //   );
-      // }
+      await Promise.all([
+        ctx.deleteMessage(message.message_id),
+        ctx.reply(
+          `✅ Share Thành công ${success.length} ✅\n${success.join(
+            "\n"
+          )}\n❌ Share Thất bại ${fail.length} ❌\n${fail.join("\n")}
+          `,
+          {
+            reply_to_message_id: ctx.message.message_id,
+          }
+        ),
+      ]);
+
+      if (needRefreshToken) {
+        await ctx.sendMessage({
+          chat_id: ctx.chat.id,
+          text: "Token hết hạn, đang thay token mới",
+        });
+        this.fillNewTokenToSheet();
+        await ctx.sendMessage({
+          chat_id: ctx.chat.id,
+          text: "Đã thay token mới",
+        });
+        // setTimeout(() => {
+        //   this.onShare(ctx, msg);
+        // }, 1000)
+      }
     } catch (error) {
-      console.log("error :>> ", error);
-      await ctx.reply(`❌ Sai Cú pháp: /share NAME_PIXEL ID_TKQC`, {
+      console.log(error);
+      await ctx.reply(`❌ ${error.message}`, {
         reply_to_message_id: ctx.message.message_id,
       });
     }
@@ -207,6 +200,7 @@ class Bot {
       const url = `https://graph.facebook.com/v20.0/${pixelID}/shared_accounts`;
       // console.log('url :>> ', url);
       // let body = `account_id=${IDQC}&access_token=${TOKEN}&business=${IDBM}`
+      console.log(TOKEN);
       const { data } = await axios({
         url,
         method: "post",
@@ -222,39 +216,20 @@ class Bot {
       });
 
       if (data.success) {
-        // await ctx.reply(
-        //   `✅ Share Pixel "${NAME_PIXEL}" cho TKQC: ${IDQC}: Thành công`,
-        //   { reply_to_message_id: ctx.message.message_id }
-        // );
-        return true;
+        return { code: 200 };
       } else {
-        // await ctx.reply(
-        //   `❌ Share Pixel "${NAME_PIXEL}" cho TKQC: ${IDQC}: Thất bại`,
-        //   { reply_to_message_id: ctx.message.message_id }
-        // );
-        return false;
+        return { code: 500 };
       }
     } catch (error) {
-      console.log("error.response :>> ", error.response);
+      console.log("error.response :>> ", error.response.data);
+      const code = error.response.data.error.code || 500
 
-      if (JSON.stringify(error.response.data).includes("token")) {
-        const index = this.listPixel.findIndex(
-          (e) => e["NAME_PIXEL"] == NAME_PIXEL
-        );
-        this.listPixel[index].TOKEN_DIE = true;
-        this.listPixel[index].REASON = JSON.stringify(error.response.data);
-        await ctx.reply(JSON.stringify(error.response.data));
+      if (code === 368 || code === 190) {
+        return { code };
       }
 
-      return false;
+      return { code };
     }
-  }
-  wait(ms) {
-    return new Promise((resolve, reject) => {
-      setTimeout(() => {
-        resolve(true);
-      }, ms);
-    });
   }
   getBW(text, Start, End) {
     var ret = text.split(Start);
@@ -291,6 +266,34 @@ class Bot {
       console.log(`Loaded ${this.listPixel.length} Cookie`);
     } catch (error) {
       console.log("error :>> ", error);
+    }
+  }
+
+  async loadRefreshTokenSheet() {
+    this.listRefreshTokens = [];
+    const spreadsheetId = "1yV74rh7NXj8nIh8oRWkzI0uM-DdxpwNsOgmbx-Qw0dk";
+    const doc = new GoogleSpreadsheet(spreadsheetId);
+    const creds = require(path.join(__dirname, "gg.json"));
+    await doc.useServiceAccountAuth(creds);
+    await doc.loadInfo();
+    const worksheet = doc.sheetsByIndex[0];
+    const rows = await worksheet.getRows();
+    for (let index = 0; index < rows.length; index++) {
+      const item = rows[index];
+      const { Token } = item;
+      this.listRefreshTokens.push(Token);
+    }
+  }
+
+  fillNewTokenToSheet() {
+    if (this.listRefreshTokens.length === 0) {
+      throw new Error("Hết Token");
+    } else {
+      const NEW_TOKEN = this.listRefreshTokens.shift();
+      this.listPixel = this.listPixel.map((data) => ({
+        ...data,
+        TOKEN: NEW_TOKEN,
+      }));
     }
   }
 }
